@@ -26,6 +26,7 @@ typedef enum {
     Scan,
     Learn,
     Navigation,
+    Numpad,
     Others,
     ScreenCount
 } Screen;

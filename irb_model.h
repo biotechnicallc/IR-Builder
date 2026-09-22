@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define IRB_SLOTS 8
-#define IRB_VERSION "3.4"
+#define IRB_VERSION "3.5"
 #define IRB_MAX_EXTRAS 48
 #define IRB_MAX_BUTTONS (IRB_SLOTS + IRB_MAX_EXTRAS)
 #define IRB_MAX_IMPORTS 4

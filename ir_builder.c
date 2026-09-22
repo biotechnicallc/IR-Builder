@@ -10,24 +10,34 @@ static void persist(IrbApp* app, Screen next);
 static unsigned position_index(unsigned slot) {
     return irb_slot_is_nav(slot) ? IRB_SLOTS + irb_nav_key_from_slot(slot) : slot;
 }
-static bool navigation_available(const IrbApp* app) {
-    if(!app->play) return true;
-    if(app->project.extra_count) return true;
-    for(unsigned key = 0; key < IRB_NAV_KEYS; ++key)
-        if(app->library.counts[irb_nav_group[key]] || irb_nav_slot(&app->project, key) >= 0)
-            return true;
-    return false;
-}
 static bool remembers(Screen screen) {
     return screen == Home || screen == Grid || screen == Pair || screen == ProjectMenu ||
            screen == Buttons || screen == Settings || screen == Navigation || screen == Browser ||
-           screen == Import || screen == Others;
+           screen == Import || screen == Others || screen == Numpad;
 }
+static bool digit_label(const char* label) {
+    return label && label[0] >= '0' && label[0] <= '9' && label[1] == 0;
+}
+
+static unsigned numpad_digit(unsigned focus) {
+    return focus < 9 ? focus + 1 : 0;
+}
+
+static int digit_slot(const IrbProject* project, unsigned digit) {
+    char label[2] = {(char)('0' + digit), 0};
+    for(unsigned i = 0; i < project->extra_count; ++i)
+        if(!strcmp(project->extras[i].label, label)) return (int)(IRB_SLOTS + i);
+    return -1;
+}
+
 static unsigned extra_slots(const IrbProject* project, uint8_t* slots) {
     uint8_t all[IRB_MAX_BUTTONS];
     unsigned total = irb_project_slots(project, all, true), count = 0;
-    for(unsigned i = 0; i < total; ++i)
-        if(all[i] >= IRB_SLOTS) slots[count++] = all[i];
+    for(unsigned i = 0; i < total; ++i) {
+        if(all[i] < IRB_SLOTS) continue;
+        const char* label = irb_project_label(project, all[i]);
+        if(!digit_label(label)) slots[count++] = all[i];
+    }
     return count;
 }
 static void show(IrbApp* app, const char* text, Screen next) {
@@ -370,12 +380,14 @@ static void finish_learn(IrbApp* app) {
 
         if(ok) {
             app->slot = new_slot;
-            uint8_t slots[IRB_MAX_BUTTONS];
-            unsigned count = extra_slots(&app->project, slots);
-            for(unsigned i = 0; i < count; ++i) {
-                if(slots[i] == new_slot) {
-                    app->focus_memory[Others] = i;
-                    break;
+            if(app->learn_return == Others) {
+                uint8_t slots[IRB_MAX_BUTTONS];
+                unsigned count = extra_slots(&app->project, slots);
+                for(unsigned i = 0; i < count; ++i) {
+                    if(slots[i] == new_slot) {
+                        app->focus_memory[Others] = i;
+                        break;
+                    }
                 }
             }
         }
@@ -624,26 +636,49 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
         }
         break;
     case Grid: {
-        bool nav = navigation_available(app);
-        if(key == InputKeyUp)
-            app->focus = app->focus >= 6  ? app->focus - 2
-                         : app->focus < 2 ? (app->focus == 1 && nav ? 7 : 6)
-                                          : app->focus - 2;
-        if(key == InputKeyDown)
-            app->focus = app->focus >= 6   ? app->focus - 6
-                         : app->focus >= 4 ? (app->focus == 5 && nav ? 7 : 6)
-                                           : app->focus + 2;
-        if(key == InputKeyLeft || key == InputKeyRight) {
-            if(app->focus < 6 || nav) app->focus ^= 1;
+        if(key == InputKeyUp) {
+            if(app->focus >= 6)
+                app->focus = app->focus == 8 ? 5 : 4;
+            else if(app->focus < 2)
+                app->focus = app->focus == 0 ? 6 : 8;
+            else
+                app->focus -= 2;
         }
+
+        if(key == InputKeyDown) {
+            if(app->focus >= 6)
+                app->focus = app->focus == 8 ? 1 : 0;
+            else if(app->focus >= 4)
+                app->focus = app->focus == 4 ? 6 : 8;
+            else
+                app->focus += 2;
+        }
+
+        if(key == InputKeyLeft) {
+            if(app->focus < 6)
+                app->focus ^= 1;
+            else
+                app->focus = app->focus == 6 ? 8 : app->focus - 1;
+        }
+
+        if(key == InputKeyRight) {
+            if(app->focus < 6)
+                app->focus ^= 1;
+            else
+                app->focus = app->focus == 8 ? 6 : app->focus + 1;
+        }
+
         if(key == InputKeyBack) {
             if(app->dirty)
                 choice(app, ConfirmLeave, "Draft not saved. Leave and lose unsaved changes?", Grid);
             else
                 go(app, app->play ? SavedMenu : Home);
         }
+
         if(key == InputKeyOk) {
-            if(app->focus == 7 && nav)
+            if(app->focus == 8)
+                go(app, Numpad);
+            else if(app->focus == 7)
                 go(app, Navigation);
             else if(app->focus == 6)
                 go(app, app->play ? Buttons : ProjectMenu);
@@ -679,7 +714,9 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
         if(key == InputKeyBack) go(app, Grid);
         if(key == InputKeyOk) {
             if(app->focus == IRB_NAV_KEYS) {
-                if(!app->play || app->project.extra_count)
+                uint8_t slots[IRB_MAX_BUTTONS];
+                unsigned count = extra_slots(&app->project, slots);
+                if(!app->play || count)
                     go(app, Others);
                 else
                     show(app, "No custom buttons in this remote.", Navigation);
@@ -708,10 +745,64 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
         }
         break;
     }
+    case Numpad: {
+        if(key == InputKeyLeft && app->focus < 9 && app->focus % 3)
+            --app->focus;
+        if(key == InputKeyRight && app->focus < 9 && app->focus % 3 < 2)
+            ++app->focus;
+        if(key == InputKeyUp) {
+            if(app->focus == 9)
+                app->focus = 7;
+            else if(app->focus >= 3)
+                app->focus -= 3;
+        }
+        if(key == InputKeyDown) {
+            if(app->focus < 6)
+                app->focus += 3;
+            else if(app->focus == 7)
+                app->focus = 9;
+        }
+
+        if(key == InputKeyBack) go(app, Grid);
+
+        if(key == InputKeyOk) {
+            unsigned digit = numpad_digit(app->focus);
+            int slot = digit_slot(&app->project, digit);
+
+            if(app->play) {
+                if(slot >= 0) {
+                    app->slot = (unsigned)slot;
+                    send(app, false);
+                } else {
+                    char text[64];
+                    snprintf(
+                        text,
+                        sizeof(text),
+                        "No code assigned to digit %u. Edit the remote first.",
+                        digit);
+                    show(app, text, Numpad);
+                }
+            } else if(slot >= 0) {
+                app->slot = (unsigned)slot;
+                app->return_focus = app->focus;
+                app->button_return = Numpad;
+                go(app, ButtonMenu);
+            } else if(app->project.extra_count >= IRB_MAX_EXTRAS) {
+                show(
+                    app,
+                    "This remote already has the maximum number of custom buttons.",
+                    Numpad);
+            } else {
+                snprintf(app->text, sizeof(app->text), "%u", digit);
+                start_learn(app, Numpad, Numpad, true);
+            }
+        }
+        break;
+    }
     case Others: {
         uint8_t slots[IRB_MAX_BUTTONS];
         unsigned count = extra_slots(&app->project, slots);
-        bool can_add = !app->play && count < IRB_MAX_EXTRAS;
+        bool can_add = !app->play && app->project.extra_count < IRB_MAX_EXTRAS;
         unsigned entries = count + (can_add ? 1 : 0);
         move(app, key, entries);
         if(key == InputKeyBack) go(app, Navigation);
@@ -823,7 +914,10 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
         break;
     }
     case ButtonMenu:
-        move(app, key, irb_slot_is_nav(app->slot) ? 3 : 6);
+        bool compact = irb_slot_is_nav(app->slot) ||
+                       (app->slot >= IRB_SLOTS &&
+                        digit_label(irb_project_label(&app->project, app->slot)));
+        move(app, key, compact ? 3 : 6);
         if(key == InputKeyBack) {
             go(app, app->button_return);
             app->focus = app->return_focus;
@@ -837,7 +931,9 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
                 else
                     position(app, app->slot, ButtonMenu);
             }
-            else if(irb_slot_is_nav(app->slot)) {
+            else if(irb_slot_is_nav(app->slot) ||
+                    (app->slot >= IRB_SLOTS &&
+                     digit_label(irb_project_label(&app->project, app->slot)))) {
                 irb_project_remove(&app->project, app->slot);
                 go(app, app->button_return);
                 persist(app, app->screen);

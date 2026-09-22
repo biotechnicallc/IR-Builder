@@ -11,11 +11,24 @@ static bool view_navigation_available(const IrbApp* app) {
             return true;
     return false;
 }
+static bool view_digit_label(const char* label) {
+    return label && label[0] >= '0' && label[0] <= '9' && label[1] == 0;
+}
+
+static int view_digit_slot(const IrbProject* project, unsigned digit) {
+    char label[2] = {(char)('0' + digit), 0};
+    for(unsigned i = 0; i < project->extra_count; ++i)
+        if(!strcmp(project->extras[i].label, label)) return (int)(IRB_SLOTS + i);
+    return -1;
+}
+
 static unsigned view_extra_slots(const IrbProject* project, uint8_t* slots) {
     uint8_t all[IRB_MAX_BUTTONS];
     unsigned total = irb_project_slots(project, all, true), count = 0;
-    for(unsigned i = 0; i < total; ++i)
-        if(all[i] >= IRB_SLOTS) slots[count++] = all[i];
+    for(unsigned i = 0; i < total; ++i) {
+        if(all[i] < IRB_SLOTS) continue;
+        if(!view_digit_label(irb_project_label(project, all[i]))) slots[count++] = all[i];
+    }
     return count;
 }
 static const char* position_title(const IrbViewModel* model) {
@@ -115,19 +128,28 @@ static void grid(Canvas* canvas, IrbViewModel* m) {
     char text[24];
     snprintf(text, sizeof(text), "%lu/8 set", irb_base_count(&m->project));
     center(canvas, 51, text);
-    if(m->navigation_available) {
-        if(m->focus >= 6)
-            canvas_draw_box(canvas, m->focus == 6 ? 0 : 38, 116, m->focus == 6 ? 37 : 26, 12);
-        canvas_set_color(canvas, m->focus == 6 ? ColorWhite : ColorBlack);
-        canvas_draw_str(canvas, 1, 125, m->play ? "Keys" : "Menu");
-        canvas_set_color(canvas, m->focus == 7 ? ColorWhite : ColorBlack);
-        canvas_draw_str(canvas, 39, 125, "Nav>");
+
+    static const uint8_t footer_x[] = {0, 23, 43};
+    static const uint8_t footer_w[] = {23, 20, 21};
+    const char* footer[] = {m->play ? "Keys" : "Menu", "Nav", "123"};
+
+    for(unsigned i = 0; i < 3; ++i) {
+        bool selected = m->focus == 6 + i;
+        if(selected) {
+            canvas_draw_box(canvas, footer_x[i], 116, footer_w[i], 12);
+            canvas_set_color(canvas, ColorWhite);
+        } else {
+            canvas_set_color(canvas, ColorBlack);
+        }
+        canvas_draw_str_aligned(
+            canvas,
+            footer_x[i] + footer_w[i] / 2,
+            125,
+            AlignCenter,
+            AlignBottom,
+            footer[i]);
         canvas_set_color(canvas, ColorBlack);
-        return;
     }
-    snprintf(text, sizeof(text), "%s [%lu]", m->play ? "Buttons" : "Menu",
-             irb_project_count(&m->project));
-    row(canvas, 125, text, m->focus == 6, 0);
 }
 static void nav_button(Canvas* canvas, int x, int y, int width, int height, bool selected) {
     if(selected) {
@@ -186,6 +208,49 @@ static void nav_aux_icon(Canvas* canvas, unsigned key, bool available) {
         canvas_draw_line(canvas, 60, 91, 57, 94);
     }
 }
+static void numpad(Canvas* canvas, IrbViewModel* m) {
+    header(canvas, m->simulate ? "123: IR OFF" : (m->play ? "Use numbers" : "Build numbers"));
+
+    static const uint8_t x[] = {3, 23, 43};
+    static const uint8_t y[] = {18, 41, 64};
+
+    for(unsigned i = 0; i < 9; ++i) {
+        unsigned row_index = i / 3;
+        unsigned col_index = i % 3;
+        unsigned digit = i + 1;
+        bool selected = m->focus == i;
+        bool configured = view_digit_slot(&m->project, digit) >= 0;
+
+        nav_button(canvas, x[col_index], y[row_index], 18, 20, selected);
+        char label[2] = {(char)('0' + digit), 0};
+        canvas_draw_str_aligned(
+            canvas,
+            x[col_index] + 9,
+            y[row_index] + 14,
+            AlignCenter,
+            AlignBottom,
+            label);
+        nav_mark(canvas, x[col_index] + 14, y[row_index] + 4, configured);
+        canvas_set_color(canvas, ColorBlack);
+    }
+
+    bool selected = m->focus == 9;
+    bool configured = view_digit_slot(&m->project, 0) >= 0;
+    nav_button(canvas, 23, 87, 18, 20, selected);
+    canvas_draw_str_aligned(canvas, 32, 101, AlignCenter, AlignBottom, "0");
+    nav_mark(canvas, 37, 91, configured);
+    canvas_set_color(canvas, ColorBlack);
+
+    unsigned configured_count = 0;
+    for(unsigned digit = 0; digit <= 9; ++digit)
+        if(view_digit_slot(&m->project, digit) >= 0) ++configured_count;
+
+    char status[24];
+    snprintf(status, sizeof(status), "%u/10 set", configured_count);
+    center(canvas, 113, status);
+    center(canvas, 127, m->play ? "OK: send" : "OK: learn/edit");
+}
+
 static void navigation(Canvas* canvas, IrbViewModel* m) {
     header(canvas, m->simulate ? "Nav: IR OFF" : (m->play ? "Use nav" : "Build nav"));
     static const uint8_t x[] = {20, 3, 22, 42, 20, 1, 22, 43};
@@ -220,7 +285,9 @@ static void navigation(Canvas* canvas, IrbViewModel* m) {
         center(canvas, 111, status);
     } else
         center(canvas, 111, "Other buttons");
-    snprintf(status, sizeof(status), "Other [%lu] >", (unsigned long)m->project.extra_count);
+    uint8_t other_slots[IRB_MAX_BUTTONS];
+    unsigned other_count = view_extra_slots(&m->project, other_slots);
+    snprintf(status, sizeof(status), "Other [%u] >", other_count);
     row(canvas, 126, status, m->focus == IRB_NAV_KEYS, 0);
 }
 void irb_draw(Canvas* canvas, void* context) {
@@ -261,6 +328,9 @@ void irb_draw(Canvas* canvas, void* context) {
         break;
     case Navigation:
         navigation(canvas, m);
+        break;
+    case Numpad:
+        numpad(canvas, m);
         break;
     case Pair: {
         header(canvas, m->pair ? "Mute" : "Power");
@@ -323,7 +393,9 @@ void irb_draw(Canvas* canvas, void* context) {
         break;
     case ButtonMenu: {
         header(canvas, irb_project_label(&m->project, m->slot));
-        if(irb_slot_is_nav(m->slot)) {
+        if(irb_slot_is_nav(m->slot) ||
+           (m->slot >= IRB_SLOTS &&
+            view_digit_label(irb_project_label(&m->project, m->slot)))) {
             const char* items[] = {"Send once", "Change code", "Remove"};
             list(canvas, items, 3, m->focus, 31);
         } else {
@@ -466,8 +538,6 @@ void irb_refresh(IrbApp* app) {
             snprintf(m->text, sizeof(m->text), "%s", app->text);
             snprintf(m->message, sizeof(m->message), "%s", app->message);
             m->list_count = m->list_start = 0;
-            if(app->screen == Grid && !m->navigation_available && app->focus == 7)
-                m->focus = app->focus = 6;
             if(app->screen == Browser) {
                 snprintf(m->folder, sizeof(m->folder), "%s", app->page.path);
                 m->list_count = app->page.total;
@@ -484,7 +554,8 @@ void irb_refresh(IrbApp* app) {
                 else if(app->screen == Others) {
                     extra_count = view_extra_slots(&app->project, slots);
                     m->list_count =
-                        extra_count + (!app->play && extra_count < IRB_MAX_EXTRAS ? 1 : 0);
+                        extra_count +
+                        (!app->play && app->project.extra_count < IRB_MAX_EXTRAS ? 1 : 0);
                 } else
                     m->list_count = app->catalog ? app->catalog->count + 1 : 0;
 

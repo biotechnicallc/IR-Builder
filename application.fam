@@ -5,7 +5,7 @@ App(
     entry_point="ir_builder_app",
     stack_size=8192,
     fap_category="Infrared",
-    fap_version=(3, 4),
+    fap_version=(3, 5),
     fap_icon="icons/ir_builder.png",
     fap_author="@sanoobis",
     fap_weburl="https://github.com/sanoobis/IR-Builder",
