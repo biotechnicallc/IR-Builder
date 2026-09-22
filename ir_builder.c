@@ -322,13 +322,19 @@ static void stop_learn(IrbApp* app) {
     app->learning = false;
 }
 
-static void start_learn(IrbApp* app, Screen next) {
+static void start_learn(
+    IrbApp* app,
+    Screen success_return,
+    Screen cancel_return,
+    bool add_extra) {
     if(app->simulate) {
-        show(app, "IR learning is unavailable in simulation mode.", Position);
+        show(app, "IR learning is unavailable in simulation mode.", cancel_return);
         return;
     }
 
-    app->learn_return = next;
+    app->learn_return = success_return;
+    app->learn_cancel_return = cancel_return;
+    app->learn_add_extra = add_extra;
     atomic_store(&app->learn_captured, false);
     app->learning = true;
     infrared_worker_rx_set_received_signal_callback(app->ir_worker, learn_received, app);
@@ -342,20 +348,56 @@ static void finish_learn(IrbApp* app) {
     if(!app->learning || !atomic_load(&app->learn_captured)) return;
     stop_learn(app);
 
+    char label[IRB_NAME_SIZE];
+    snprintf(
+        label,
+        sizeof(label),
+        "%s",
+        app->learn_add_extra ? app->text : irb_project_label(&app->project, app->slot));
+
     char error[IRB_ERROR_SIZE] = {0};
-    if(!irb_learn_store(
-           app->storage, &app->project, app->slot, app->learned_signal, error)) {
+    bool ok = false;
+
+    if(app->learn_add_extra) {
+        uint32_t new_slot = 0;
+        ok = irb_learn_add_extra(
+            app->storage,
+            &app->project,
+            label,
+            app->learned_signal,
+            &new_slot,
+            error);
+
+        if(ok) {
+            app->slot = new_slot;
+            uint8_t slots[IRB_MAX_BUTTONS];
+            unsigned count = extra_slots(&app->project, slots);
+            for(unsigned i = 0; i < count; ++i) {
+                if(slots[i] == new_slot) {
+                    app->focus_memory[Others] = i;
+                    break;
+                }
+            }
+        }
+    } else {
+        ok = irb_learn_store(
+            app->storage,
+            &app->project,
+            app->slot,
+            app->learned_signal,
+            error);
+    }
+
+    app->learn_add_extra = false;
+
+    if(!ok) {
         show(app, error[0] ? error : "Could not save learned signal.", app->learn_return);
         return;
     }
 
     irb_cache_clear(&app->signals);
     char text[IRB_ERROR_SIZE];
-    snprintf(
-        text,
-        sizeof(text),
-        "Learned %s from the physical remote.",
-        irb_project_label(&app->project, app->slot));
+    snprintf(text, sizeof(text), "Learned %s from the physical remote.", label);
     show(app, text, app->learn_return);
     persist(app, Message);
 }
@@ -375,12 +417,23 @@ static void save(IrbApp* app, bool replace) {
     start_job(app, job, app->keyboard_return);
 }
 static void text_done(IrbApp* app) {
-    if(!irb_name_valid(app->text, app->text_purpose != TextLabel)) {
+    bool label_text = app->text_purpose == TextLabel || app->text_purpose == TextAddExtra;
+    if(!irb_name_valid(app->text, !label_text)) {
         show(app, "Use 1-31 printable characters. File names cannot contain path characters.",
              Keyboard);
         return;
     }
-    if(app->text_purpose == TextLabel) {
+    if(app->text_purpose == TextAddExtra) {
+        if(app->project.extra_count >= IRB_MAX_EXTRAS) {
+            show(app, "This remote already has the maximum number of custom buttons.", Others);
+            return;
+        }
+        if(!irb_project_label_available(&app->project, app->text, UINT32_MAX)) {
+            show(app, "Button name already exists.", Keyboard);
+            return;
+        }
+        start_learn(app, Others, Others, true);
+    } else if(app->text_purpose == TextLabel) {
         if(!irb_project_label_available(&app->project, app->text, app->slot)) {
             show(app, "Button name already exists.", Keyboard);
             return;
@@ -626,10 +679,10 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
         if(key == InputKeyBack) go(app, Grid);
         if(key == InputKeyOk) {
             if(app->focus == IRB_NAV_KEYS) {
-                if(app->project.extra_count)
+                if(!app->play || app->project.extra_count)
                     go(app, Others);
                 else
-                    show(app, "No unmatched buttons in this remote.", Navigation);
+                    show(app, "No custom buttons in this remote.", Navigation);
                 break;
             }
             int slot = irb_nav_slot(&app->project, app->focus);
@@ -658,16 +711,22 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
     case Others: {
         uint8_t slots[IRB_MAX_BUTTONS];
         unsigned count = extra_slots(&app->project, slots);
-        move(app, key, count);
+        bool can_add = !app->play && count < IRB_MAX_EXTRAS;
+        unsigned entries = count + (can_add ? 1 : 0);
+        move(app, key, entries);
         if(key == InputKeyBack) go(app, Navigation);
-        if(key == InputKeyOk && count) {
-            app->slot = slots[app->focus];
-            app->return_focus = app->focus;
-            app->button_return = Others;
-            if(app->play)
-                send(app, false);
-            else
-                go(app, ButtonMenu);
+        if(key == InputKeyOk && entries) {
+            if(can_add && app->focus == count) {
+                keyboard(app, TextAddExtra, "");
+            } else if(app->focus < count) {
+                app->slot = slots[app->focus];
+                app->return_focus = app->focus;
+                app->button_return = Others;
+                if(app->play)
+                    send(app, false);
+                else
+                    go(app, ButtonMenu);
+            }
         }
         break;
     }
@@ -718,7 +777,7 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
                     start_job(app, new_job(app, JobScan), Position);
                 }
             } else if(app->action == 3) {
-                start_learn(app, app->return_screen);
+                start_learn(app, app->return_screen, Position, false);
             } else {
                 irb_project_set_position(&app->project, app->slot, 0);
                 go(app, app->return_screen);
@@ -772,8 +831,12 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
         if(key == InputKeyOk) {
             if(app->focus == 0)
                 send(app, false);
-            else if(app->focus == 1)
-                position(app, app->slot, ButtonMenu);
+            else if(app->focus == 1) {
+                if(app->slot >= IRB_SLOTS && !irb_slot_is_nav(app->slot))
+                    start_learn(app, ButtonMenu, ButtonMenu, false);
+                else
+                    position(app, app->slot, ButtonMenu);
+            }
             else if(irb_slot_is_nav(app->slot)) {
                 irb_project_remove(&app->project, app->slot);
                 go(app, app->button_return);
@@ -940,7 +1003,8 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
     case Learn:
         if(key == InputKeyBack) {
             stop_learn(app);
-            go(app, Position);
+            app->learn_add_extra = false;
+            go(app, app->learn_cancel_return);
         }
         break;
     case Scan:

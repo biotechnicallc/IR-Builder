@@ -395,7 +395,7 @@ void irb_draw(Canvas* canvas, void* context) {
     }
     case Learn:
         header(canvas, "Learn from remote");
-        wrap(canvas, position_title(m), 28, 42);
+        wrap(canvas, m->learn_add_extra ? m->text : position_title(m), 28, 42);
         center(canvas, 63, "Point remote at");
         center(canvas, 76, "Flipper IR port");
         center(canvas, 96, "Press the button");
@@ -456,6 +456,7 @@ void irb_refresh(IrbApp* app) {
             m->play = app->play;
             m->simulate = app->simulate;
             m->navigation_available = view_navigation_available(app);
+            m->learn_add_extra = app->learn_add_extra;
             m->busy = app->worker != NULL;
             m->send_job = app->job && app->job->type == JobSend;
             m->tick = app->tick;
@@ -477,20 +478,28 @@ void irb_refresh(IrbApp* app) {
                 }
             } else if(app->screen == Buttons || app->screen == Others || app->screen == Import) {
                 uint8_t slots[IRB_MAX_BUTTONS];
-                m->list_count = app->screen == Buttons
-                                    ? irb_project_slots(&app->project, slots, app->play)
-                                : app->screen == Others ? view_extra_slots(&app->project, slots)
-                                : app->catalog          ? app->catalog->count + 1
-                                                        : 0;
+                unsigned extra_count = 0;
+                if(app->screen == Buttons)
+                    m->list_count = irb_project_slots(&app->project, slots, app->play);
+                else if(app->screen == Others) {
+                    extra_count = view_extra_slots(&app->project, slots);
+                    m->list_count =
+                        extra_count + (!app->play && extra_count < IRB_MAX_EXTRAS ? 1 : 0);
+                } else
+                    m->list_count = app->catalog ? app->catalog->count + 1 : 0;
+
                 if(app->focus >= m->list_count) app->focus = m->list_count ? m->list_count - 1 : 0;
                 m->focus = app->focus;
                 m->list_start = app->focus / IRB_PAGE_SIZE * IRB_PAGE_SIZE;
                 for(unsigned i = 0; i < IRB_PAGE_SIZE && m->list_start + i < m->list_count; ++i) {
                     unsigned index = m->list_start + i;
-                    const char* name = app->screen == Buttons || app->screen == Others
-                                           ? irb_project_label(&app->project, slots[index])
-                                       : index ? app->catalog->entries[index - 1].name
-                                               : "Add all new";
+                    const char* name;
+                    if(app->screen == Others && !app->play && index == extra_count)
+                        name = "+ Add button";
+                    else if(app->screen == Buttons || app->screen == Others)
+                        name = irb_project_label(&app->project, slots[index]);
+                    else
+                        name = index ? app->catalog->entries[index - 1].name : "Add all new";
                     snprintf(m->rows[i], IRB_PATH_SIZE, "%s", name);
                 }
             }

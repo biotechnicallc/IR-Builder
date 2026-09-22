@@ -30,7 +30,7 @@ typedef enum {
     ScreenCount
 } Screen;
 typedef enum { BrowseLibrary, BrowseImport, BrowseSaved, BrowseOpen } BrowsePurpose;
-typedef enum { TextSave, TextLabel, TextRename, TextDuplicate } TextPurpose;
+typedef enum { TextSave, TextLabel, TextRename, TextDuplicate, TextAddExtra } TextPurpose;
 typedef enum {
     ConfirmNew,
     ConfirmOpen,
@@ -59,6 +59,7 @@ typedef struct {
     Screen screen;
     unsigned focus, slot, position, pair, action, tick, help;
     bool simulate, play, busy, cancelable, committing, upper, navigation_available;
+    bool learn_add_extra;
     uint32_t progress;
     char status[48], text[IRB_NAME_SIZE], message[IRB_ERROR_SIZE];
     char default_library[IRB_PATH_SIZE];
@@ -105,13 +106,13 @@ struct IrbApp {
     IrbFileList files;
     IrbSignalCache signals;
     Screen screen, return_screen, message_return, job_return, choice_return, keyboard_return;
-    Screen learn_return;
+    Screen learn_return, learn_cancel_return;
     unsigned focus, slot, position, pair, action, repeats, tick, help, return_focus;
     unsigned focus_memory[ScreenCount];
     unsigned position_actions[IRB_POSITION_SLOTS];
     Screen button_return;
     bool consume_ok, consume_back, checking;
-    bool learning;
+    bool learning, learn_add_extra;
     atomic_bool learn_captured;
     InfraredWorker* ir_worker;
     InfraredSignal* learned_signal;
