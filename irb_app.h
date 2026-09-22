@@ -24,6 +24,7 @@ typedef enum {
     Choice,
     Help,
     Scan,
+    Learn,
     Navigation,
     Others,
     ScreenCount
@@ -51,7 +52,7 @@ typedef enum {
     JobDelete,
     JobSettings
 } JobType;
-enum { EventInput = 0x1000, EventDone = 0x2000 };
+enum { EventInput = 0x1000, EventDone = 0x2000, EventLearned = 0x3000 };
 typedef struct {
     IrbProject project;
     uint32_t counts[IRB_GROUPS];
@@ -70,6 +71,7 @@ typedef struct {
     bool row_directories[IRB_PAGE_SIZE];
 } IrbViewModel;
 typedef struct IrbApp IrbApp;
+typedef struct InfraredWorker InfraredWorker;
 typedef struct {
     IrbApp* app;
     JobType type;
@@ -103,11 +105,16 @@ struct IrbApp {
     IrbFileList files;
     IrbSignalCache signals;
     Screen screen, return_screen, message_return, job_return, choice_return, keyboard_return;
+    Screen learn_return;
     unsigned focus, slot, position, pair, action, repeats, tick, help, return_focus;
     unsigned focus_memory[ScreenCount];
     unsigned position_actions[IRB_POSITION_SLOTS];
     Screen button_return;
     bool consume_ok, consume_back, checking;
+    bool learning;
+    atomic_bool learn_captured;
+    InfraredWorker* ir_worker;
+    InfraredSignal* learned_signal;
     InputKey last_direction;
     bool draft, dirty, loaded_saved, draft_current, play, simulate, upper, delete_both;
     BrowsePurpose browse_purpose;

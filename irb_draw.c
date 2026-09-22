@@ -4,6 +4,7 @@
 #include <string.h>
 const char irb_keys[] = "abcdefghijklmnopqrstuvwxyz0123456789 _-";
 static bool view_navigation_available(const IrbApp* app) {
+    if(!app->play) return true;
     if(app->project.extra_count) return true;
     for(unsigned key = 0; key < IRB_NAV_KEYS; ++key)
         if(app->library.counts[irb_nav_group[key]] || irb_nav_slot(&app->project, key) >= 0)
@@ -193,7 +194,7 @@ static void navigation(Canvas* canvas, IrbViewModel* m) {
     static const uint8_t height[] = {19, 22, 20, 22, 18, 18, 18, 18};
     for(unsigned i = 0; i < IRB_NAV_KEYS; ++i) {
         bool configured = irb_nav_slot(&m->project, i) >= 0;
-        bool available = configured || (!m->play && m->counts[irb_nav_group[i]]);
+        bool available = configured || !m->play;
         nav_button(canvas, x[i], y[i], width[i], height[i], m->focus == i);
         if(i < 5 && i != 2)
             nav_chevron(canvas, x[i] + width[i] / 2, y[i] + height[i] / 2, i, available);
@@ -271,13 +272,16 @@ void irb_draw(Canvas* canvas, void* context) {
     case Position: {
         header(canvas, position_title(m));
         int group = irb_slot_group_index(m->slot);
-        snprintf(buffer, sizeof(buffer), "%lu/%lu", (unsigned long)m->position,
-                 (unsigned long)(group >= 0 ? m->counts[group] : 0));
+        uint32_t count = group >= 0 ? m->counts[group] : 0;
+        if(count)
+            snprintf(buffer, sizeof(buffer), "%lu/%lu", (unsigned long)m->position,
+                     (unsigned long)count);
+        else
+            snprintf(buffer, sizeof(buffer), "No library code");
         center(canvas, 35, buffer);
-        center(canvas, 49, "<  position  >");
-        const char* items[] = {"Use number", "Send once", "Auto scan", "Skip"};
-        list(canvas, items, 4, m->action, 67);
-        center(canvas, 125, "Hold L/R: fast");
+        center(canvas, 48, count ? "<  position  >" : "Physical remote");
+        const char* items[] = {"Use number", "Send once", "Auto scan", "Learn remote", "Skip"};
+        list(canvas, items, 5, m->action, 59);
         break;
     }
     case ProjectMenu: {
@@ -389,6 +393,15 @@ void irb_draw(Canvas* canvas, void* context) {
         center(canvas, 125, buffer);
         break;
     }
+    case Learn:
+        header(canvas, "Learn from remote");
+        wrap(canvas, position_title(m), 28, 42);
+        center(canvas, 63, "Point remote at");
+        center(canvas, 76, "Flipper IR port");
+        center(canvas, 96, "Press the button");
+        center(canvas, 110, "Listening...");
+        center(canvas, 127, "Back: cancel");
+        break;
     case Scan:
         header(canvas, m->simulate ? "Scan: IR OFF" : "Auto scan");
         wrap(canvas, position_title(m), 28, 40);

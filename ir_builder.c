@@ -1,4 +1,6 @@
 #include "irb_app.h"
+#include "irb_learn.h"
+#include <infrared_worker.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +11,7 @@ static unsigned position_index(unsigned slot) {
     return irb_slot_is_nav(slot) ? IRB_SLOTS + irb_nav_key_from_slot(slot) : slot;
 }
 static bool navigation_available(const IrbApp* app) {
+    if(!app->play) return true;
     if(app->project.extra_count) return true;
     for(unsigned key = 0; key < IRB_NAV_KEYS; ++key)
         if(app->library.counts[irb_nav_group[key]] || irb_nav_slot(&app->project, key) >= 0)
@@ -279,15 +282,82 @@ static void position(IrbApp* app, unsigned slot, Screen next) {
         return;
     }
     app->slot = slot;
-    if(!app->library.counts[group]) {
-        show(app, "No signals for this function in this library.", next);
+    uint32_t count = app->library.counts[group];
+    app->position = irb_project_position(&app->project, slot);
+    if(count && !app->position) app->position = 1;
+    if(!count) app->position = 0;
+    app->return_screen = next;
+    app->action = count ? app->position_actions[position_index(slot)] : 3;
+    go(app, Position);
+}
+
+static void learn_received(void* context, InfraredWorkerSignal* received_signal) {
+    IrbApp* app = context;
+    bool expected = false;
+    if(!app->learning ||
+       !atomic_compare_exchange_strong(&app->learn_captured, &expected, true))
+        return;
+
+    if(infrared_worker_signal_is_decoded(received_signal)) {
+        infrared_signal_set_message(
+            app->learned_signal, infrared_worker_get_decoded_signal(received_signal));
+    } else {
+        const uint32_t* timings = NULL;
+        size_t timings_size = 0;
+        infrared_worker_get_raw_signal(received_signal, &timings, &timings_size);
+        infrared_signal_set_raw_signal(
+            app->learned_signal,
+            timings,
+            timings_size,
+            INFRARED_COMMON_CARRIER_FREQUENCY,
+            INFRARED_COMMON_DUTY_CYCLE);
+    }
+
+    view_dispatcher_send_custom_event(app->dispatcher, EventLearned);
+}
+
+static void stop_learn(IrbApp* app) {
+    if(!app->learning) return;
+    infrared_worker_rx_stop(app->ir_worker);
+    app->learning = false;
+}
+
+static void start_learn(IrbApp* app, Screen next) {
+    if(app->simulate) {
+        show(app, "IR learning is unavailable in simulation mode.", Position);
         return;
     }
-    app->position = irb_project_position(&app->project, slot);
-    if(!app->position) app->position = 1;
-    app->return_screen = next;
-    app->action = app->position_actions[position_index(slot)];
-    go(app, Position);
+
+    app->learn_return = next;
+    atomic_store(&app->learn_captured, false);
+    app->learning = true;
+    infrared_worker_rx_set_received_signal_callback(app->ir_worker, learn_received, app);
+    infrared_worker_rx_enable_blink_on_receiving(app->ir_worker, true);
+    infrared_worker_rx_enable_signal_decoding(app->ir_worker, true);
+    go(app, Learn);
+    infrared_worker_rx_start(app->ir_worker);
+}
+
+static void finish_learn(IrbApp* app) {
+    if(!app->learning || !atomic_load(&app->learn_captured)) return;
+    stop_learn(app);
+
+    char error[IRB_ERROR_SIZE] = {0};
+    if(!irb_learn_store(
+           app->storage, &app->project, app->slot, app->learned_signal, error)) {
+        show(app, error[0] ? error : "Could not save learned signal.", app->learn_return);
+        return;
+    }
+
+    irb_cache_clear(&app->signals);
+    char text[IRB_ERROR_SIZE];
+    snprintf(
+        text,
+        sizeof(text),
+        "Learned %s from the physical remote.",
+        irb_project_label(&app->project, app->slot));
+    show(app, text, app->learn_return);
+    persist(app, Message);
 }
 static void keyboard(IrbApp* app, TextPurpose purpose, const char* initial) {
     app->text_purpose = purpose;
@@ -580,12 +650,8 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
                 app->button_return = Navigation;
                 app->return_focus = app->focus;
                 go(app, ButtonMenu);
-            } else {
-                char text[96];
-                snprintf(text, sizeof(text), "No %s candidates in this library.",
-                         irb_nav_labels[app->focus]);
-                show(app, text, Navigation);
-            }
+            } else
+                position(app, IRB_NAV_SLOT_BASE + app->focus, Navigation);
         }
         break;
     }
@@ -622,22 +688,39 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
             show(app, "This imported button has no position list.", app->return_screen);
             break;
         }
-        if(key == InputKeyLeft || key == InputKeyRight)
-            app->position = irb_position_step(app->position, app->library.counts[group],
-                                              key == InputKeyRight, app->repeats);
-        if(key == InputKeyUp) app->action = (app->action + 3) % 4;
-        if(key == InputKeyDown) app->action = (app->action + 1) % 4;
+        uint32_t count = app->library.counts[group];
+        if(count && (key == InputKeyLeft || key == InputKeyRight))
+            app->position =
+                irb_position_step(app->position, count, key == InputKeyRight, app->repeats);
+        if(key == InputKeyUp) app->action = (app->action + 4) % 5;
+        if(key == InputKeyDown) app->action = (app->action + 1) % 5;
         if(key == InputKeyBack) go(app, app->return_screen);
         if(key == InputKeyOk) {
-            if(app->action == 1)
-                send(app, true);
-            else if(app->action == 2) {
-                go(app, Scan);
-                app->action = 0;
-                start_job(app, new_job(app, JobScan), Position);
+            if(app->action == 0) {
+                if(!count)
+                    show(app, "No library code. Choose Learn remote.", Position);
+                else {
+                    irb_project_set_position(&app->project, app->slot, app->position);
+                    go(app, app->return_screen);
+                    persist(app, app->screen);
+                }
+            } else if(app->action == 1) {
+                if(!count)
+                    show(app, "No library code to send. Choose Learn remote.", Position);
+                else
+                    send(app, true);
+            } else if(app->action == 2) {
+                if(!count)
+                    show(app, "No library codes to scan. Choose Learn remote.", Position);
+                else {
+                    go(app, Scan);
+                    app->action = 0;
+                    start_job(app, new_job(app, JobScan), Position);
+                }
+            } else if(app->action == 3) {
+                start_learn(app, app->return_screen);
             } else {
-                irb_project_set_position(&app->project, app->slot,
-                                         app->action == 3 ? 0 : app->position);
+                irb_project_set_position(&app->project, app->slot, 0);
                 go(app, app->return_screen);
                 persist(app, app->screen);
             }
@@ -854,6 +937,12 @@ static void key_event(IrbApp* app, InputKey key, InputType type) {
         if(key == InputKeyRight || key == InputKeyOk) app->help = (app->help + 1) % 5;
         if(key == InputKeyBack) go(app, app->return_screen);
         break;
+    case Learn:
+        if(key == InputKeyBack) {
+            stop_learn(app);
+            go(app, Position);
+        }
+        break;
     case Scan:
         go(app, Position);
         break;
@@ -871,6 +960,8 @@ static bool custom(void* context, uint32_t event) {
     IrbApp* app = context;
     if(event == EventDone && app->worker)
         finish_job(app);
+    else if(event == EventLearned)
+        finish_learn(app);
     else if((event & 0xF000) == EventInput)
         key_event(app, event & 0xF, (event >> 4) & 0xF);
     irb_refresh(app);
@@ -886,10 +977,13 @@ static void tick(void* context) {
 int32_t ir_builder_app(void* argument) {
     IrbApp* app = calloc(1, sizeof(*app));
     app->simulate = argument && !strcmp(argument, "--simulate");
+    atomic_init(&app->learn_captured, false);
     app->storage = furi_record_open(RECORD_STORAGE);
     app->gui = furi_record_open(RECORD_GUI);
     app->dispatcher = view_dispatcher_alloc();
     app->view = view_alloc();
+    app->ir_worker = infrared_worker_alloc();
+    app->learned_signal = infrared_signal_alloc();
     irb_project_init(&app->project);
     irb_storage_prepare(app->storage);
     char bundled_error[IRB_ERROR_SIZE] = {0};
@@ -910,6 +1004,7 @@ int32_t ir_builder_app(void* argument) {
     irb_refresh(app);
     view_dispatcher_switch_to_view(app->dispatcher, 0);
     view_dispatcher_run(app->dispatcher);
+    stop_learn(app);
     if(app->worker) {
         atomic_store(&app->job->cancel, true);
         furi_thread_join(app->worker);
@@ -926,6 +1021,8 @@ int32_t ir_builder_app(void* argument) {
     irb_files_clear(&app->files);
     irb_cache_clear(&app->signals);
     free(app->catalog);
+    infrared_signal_free(app->learned_signal);
+    infrared_worker_free(app->ir_worker);
     furi_record_close(RECORD_GUI);
     furi_record_close(RECORD_STORAGE);
     free(app);
